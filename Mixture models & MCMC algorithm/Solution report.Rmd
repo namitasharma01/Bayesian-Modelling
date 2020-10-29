@@ -1,0 +1,538 @@
+---
+title: "Lab3"
+author: "Namita Sharma, Aman Kumar Nayak"
+date: "5/17/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, results='asis'}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+# 1. Normal model, mixture of normal model with semi-conjugate prior
+
+## (a) Normal model
+
+### (i) Gibbs sampler
+
+Code in appendix 1 (a)
+
+```{r 1.1a, fig.align='center', fig.height=3.8, fig.width=5}
+######################################################################
+# 1. Normal model, mixture of normal model with semi-conjugate prior
+######################################################################
+library("geoR")
+
+rainfall <- read.table(
+  file="C:/Users/namit/Downloads/Bayesian Learning/R files/Lab3/rainfall.dat",
+  header=FALSE)
+
+#-------------------------------------------------------------------------
+# (a) Normal model
+
+## (i) Gibbs sampler 
+fullCondPostMu <- function(mu0, tausq0, sigsq, y) {
+  n       <- length(y)
+  ybar    <- mean(y)
+  
+  # Compute mu_n and tausq_n
+  tausq_n <- sigsq*tausq0 / (n*tausq0 + sigsq)
+  w       <- (n/sigsq) / (n/sigsq + 1/tausq0)
+  mu_n    <- w*ybar + (1-w)*mu0
+  
+  # Sample from full conditional posterior of mu
+  mu_post <- rnorm(1, mean=mu_n, sd=sqrt(tausq_n))
+  
+  return(mu_post)
+}
+
+fullCondPostSig <- function(nu0, sigsq0, mu_post, y) {
+  n <- length(y)
+  
+  # Compute nu_n and sigsq_n
+  nu_n       <- nu0 + n
+  sigsq_n    <- (nu0*sigsq0 + sum((y-mu_post)**2)) / (n+nu0)
+  
+  # Sample from full conditional posterior of sigsq
+  sigsq_post <- geoR::rinvchisq(1, df=nu_n, scale=sigsq_n)
+  
+  return(sigsq_post)
+}
+
+gibbsSampler <- function(iter=100, mu0, tausq0, nu0, sigsq0, sigsq_init=1, data=rainfall$V1) {
+  mu_post       <- numeric(iter)
+  sigsq_post    <- numeric(iter)
+     
+  # First iteration of Gibbs sampler - Start with a random value for mu or sigsq
+  sigsq_init    <- geoR::rinvchisq(1, df=nu0, scale=sigsq0)
+  sigsq_post[1] <- sigsq_init
+  mu_post[1]    <- fullCondPostMu(mu0=mu0, tausq0=tausq0, sigsq=sigsq_post[1], y=data)
+
+  # Gibbs sampler for remaining iter-1 samples
+  for (i in 2:iter) {
+    mu_post[i]    <- fullCondPostMu(mu0=mu0, tausq0=tausq0, sigsq=sigsq_post[i-1], y=data)
+    sigsq_post[i] <- fullCondPostSig(nu0=nu0, sigsq0=sigsq0, mu_post=mu_post[i], y=data)
+  }
+  
+  return(list(mu=mu_post, sigsq=sigsq_post))
+}
+
+```
+
+### (ii) Convergence of gibbs sampler
+
+```{r 1.1b, fig.align='center', fig.height=3.8, fig.width=5}
+## (ii) Convergence of gibbs sampler
+
+iter=1000
+# mu0    :  Prior mean of Mu
+# tausq0 :  Prior SD of Mu
+# nu0    :  Degrees of freedom for prior of Sigsq
+# sigsq0 :  Best guess of Sigsq
+# sigsq  :  Initial value of Sigsq
+
+# mu0=0, tausq0=1, nu0=1, sigsq0=1     : mu=26.5, sig2=1550
+# mu0=10, tausq0=10, nu0=4, sigsq0=10  : mu=31.8, sig2=1550
+# mu=1, tausq=100 nu0=1, sigsq=100     : mu=32.3, sig2=1550
+gibbSample <- gibbsSampler(iter=iter, mu0=1, tausq0=100, nu0=1, sigsq0=100)
+
+plot(1:iter, gibbSample$mu, type="l", col="blue", 
+     xlab="Iterations", ylab="Conditional Posterior Mu")
+plot(1:iter, gibbSample$sigsq, type="l", col="blue",
+     xlab="Iterations", ylab="Conditional Posterior Sigma Square")
+
+```
+
+We can see from the traceplots that the gibbs sampler converges for both parameters $\mu$ and $\sigma^2$. We set the prior parameter values to $\mu_0=1$, $\tau_0^2$=100, $\nu0$=1, $\sigma_0^2$=100 as we assume an uninformative prior without seeing any data points (only 1 data point) and assume a random variance 100. It can be observed that the gibbs sampler converges approximately to a mean of 32.2 and a variance of 1550.  
+
+## (b) Mixture normal model
+
+```{r 1.2, fig.align='center', fig.height=3.8, fig.width=5}
+#-------------------------------------------------------------------------
+# (b) Mixture normal model
+
+## Setting parameters
+# Data parameters
+x <- as.matrix(rainfall$V1)
+
+# Model parameters 
+nComp <- 2
+
+# Prior parameters
+alpha  <- rep(10, nComp)     # Parameter for Dirichlet 
+mu0    <- rep(10, nComp)     # Prior mean of Mu
+tau2_0 <- rep(10, nComp)     # Prior SD of Mu
+nu0    <- rep(4, nComp)      # Degrees of freedom for prior of Sig2
+sig2_0 <- rep(var(x), nComp) # Best guess of Sig2
+
+# MCMC parameters
+nIter <- 1000    # Number of gibbs sampling draws
+
+# Plotting parameters
+plotFit    <- TRUE               # Flag to set/unset plot display in each iteration
+lcol       <- c("blue", "green") # Colours to plot
+sleepTime  <- 0.1                # Time between iterations to plot graph
+
+## Defining functions
+# Function to simulate from Inv-Chisq distribution
+rScaledInvChi2 <- function(n, df, scale){
+  return((df*scale)/rchisq(n, df=df))
+}
+
+# Function to simulate from Dirichlet distribution
+rDirichlet <- function(param){
+  nCat    <- length(param)         # Number of categories
+  piDraws <- matrix(NA, nCat, 1)   # Mixing coefficients of components in the model 
+  
+  for (j in 1:nCat){
+    piDraws[j] <- rgamma(1, param[j], 1)
+  }
+  piDraws = piDraws / sum(piDraws) # Dividing every column of piDraws by the sum of the elements in that column
+  return(piDraws)
+}
+
+# Simple function that converts between two different representations of the mixture component allocation
+S2alloc <- function(S){
+  n     <- dim(S)[1]   # Number of data points
+  alloc <- rep(0, n)   # Vector to hold the component number to which each data point belongs
+  for (i in 1:n){
+    alloc[i] <- which(S[i,] == 1) # The component number to which the data point is assigned
+  }
+  return(alloc)
+}
+
+## Initialize MCMC
+nObs <- length(x)                                             # Number of observations
+S    <- t(rmultinom(nObs, size=1 , prob=rep(1/nComp, nComp))) # nObs-by-nComp matrix with component allocations
+probObsInComp <- rep(NA, nComp)                               # Probability of a data point belonging to any component
+mu     <- quantile(x, probs = seq(0, 1, length=nComp))
+sig2   <- rep(var(x), nComp)
+
+## Initialize plot 
+iterCount   <- 0                                               
+xGrid       <- seq(min(x)-1*sd(x), max(x)+1*sd(x), length=100) # x-values to plot the density
+mixDensMean <- rep(0, length(xGrid))                           # Mean of mixture densities
+xlim        <- c(min(xGrid), max(xGrid))                       
+ylim        <- c(0, 2*max(hist(x, breaks=100)$density))  
+
+# Mixture component parameters 
+mu_collect   <- matrix(NA, nIter, nComp)
+sig2_collect <- matrix(NA, nIter, nComp)
+pi_collect   <- matrix(NA, nIter, nComp)
+
+## EM algorithm
+for (k in 1:nIter) {
+  #print(paste('Iteration number:', k))  
+  alloc  <- S2alloc(S) # Just a function that converts between different representations of the group allocations
+  nAlloc <- colSums(S)
+  #print(nAlloc)
+  
+  # Update Pi's -components probabilities (Using full conditional posterior of pi) 
+  pi <- rDirichlet(alpha + nAlloc)
+  
+  # Collect the component probabilities in each iteration 
+  pi_collect[k, ] <- pi
+  
+  # Update mu's -components means (using full conditional posterior of mu)
+  for (j in 1:nComp){
+    tau2_n <- 1 / ((nAlloc[j]/sig2[j]) + (1/tau2_0[j])) # Posterior SD of Mu
+    w      <- tau2_n * nAlloc[j]/sig2[j]                
+    mu_n   <- w*mean(x[alloc==j]) + (1-w)*mu0           # Posterior mean of Mu
+    mu[j]  <- rnorm(1, mean=mu_n, sd=sqrt(tau2_n))      # Component means
+  }
+  
+  # Collect the component means in each iteration 
+  mu_collect[k, ] <- mu
+  
+  # Update sigma2's -component variances (Using full conditional posterior of sigma)
+  for (j in 1:nComp){
+    nu_n    <- nu0[j] + nAlloc[j]     
+    sig2_n  <- (nu0[j]*sig2_0[j] + sum((x[alloc==j]-mu[j])^2)) / (nu0[j]+nAlloc[j])
+    sig2[j] <- rScaledInvChi2(1, df=nu_n, scale=sig2_n) # Components variances
+  }
+
+  # Collect the component variances in each iteration 
+  sig2_collect[k, ] <- sig2  
+  
+  # Update allocation using new component means and variances
+  for (i in 1:nObs){
+    for (j in 1:nComp){
+      probObsInComp[j] <- pi[j]*dnorm(x[i], mean=mu[j], sd=sqrt(sig2[j]))
+    }
+    S[i, ] <- t(rmultinom(n=1, size=1 , prob=probObsInComp/sum(probObsInComp)))
+  }
+  
+  # Printing the fitted density against data histogram
+  if (plotFit && k%%1==0){
+    iterCount <- iterCount + 1
+    #hist(x, breaks=20, freq=FALSE, xlim=xlim, main=paste("Iteration number", k), ylim=ylim)
+    
+    mixDens    <- rep(0, length(xGrid))
+    components <- c()
+    for (j in 1:nComp){
+      compDens <- dnorm(xGrid, mu[j], sd=sqrt(sig2[j]))    # Component density
+      mixDens  <- mixDens + pi[j]*compDens                 # Mixture density
+      #lines(xGrid, compDens, type="l", lwd=2, col=lcol[j]) 
+      #components[j] <- paste("Component ", j)
+    }
+    mixDensMean <- ((iterCount-1)*mixDensMean + mixDens)/iterCount # Mean mixture density
+    
+    #lines(xGrid, mixDens, type="l", lty=2, lwd=3, col='red')
+    #legend("topright", box.lty=1, legend=c("Data histogram", components, 'Mixture'), 
+    #       col=c("black", lcol[1:nComp], 'red'), lw=2)
+    #Sys.sleep(sleepTime)
+  }  
+}
+
+# Plots of posterior trajectories and means to evaluate convergence 
+plot(mu_collect[, 1], type="l", ylab="Mu1", main="Mean of comp1", col="red")
+plot(mu_collect[, 2], type="l", ylab="Mu1", main="Mean of comp2", col="blue")
+plot(sqrt(sig2_collect[, 1]), type="l", ylab="Sigma1", main="SD of comp1", col="red")
+plot(sqrt(sig2_collect[, 2]), type="l", ylab="Sigma2", main="SD of comp2", col="blue")
+plot(pi_collect[, 1], type="l", ylab="Pi1", main="Probability of comp1", col="red")
+plot(pi_collect[, 2], type="l", ylab="Pi2", main="Probability of comp2", col="blue")
+
+```
+
+We can see from the traceplots, that after about 100 iterations (burn-in), all the parameters of the mixture densities seem to achieve convergence. We can see from the trajectories that the component means converge to values $\mu = [55, 10]$, the component standard deviations converge to approximately $\sigma = [5, 45]$ and the final component probabilities are approximately $\pi = [0.55, 0.45]$
+
+## (c) Graphical comparison
+
+```{r 1.3, fig.align='center', fig.height=3.8, fig.width=5}
+#-------------------------------------------------------------------------
+# (c) Graphical comparison
+
+# Kernel density estimate of the data
+kernelDensData = density(rainfall$V1)
+
+# Mean of Gibbs full conditional posterior of Mu and Sigma2 
+meanPostMu   = mean(gibbSample$mu)
+meanPostsig2 = mean(gibbSample$sigsq)
+
+# Mean of posterior draws of mixture component parameters
+meanPostMuMix   <- apply(mu_collect, 2, mean)
+meanPostSig2Mix <- apply(sig2_collect, 2, mean)
+meanPostPiMix   <- apply(pi_collect, 2, mean)
+
+# Mean mixed density
+meanMixDens <- rep(0, length(xGrid))
+for (j in 1:nComp){
+  compDens <- dnorm(xGrid, meanPostMuMix[j], sd=sqrt(meanPostSig2Mix[j])) # Component density
+  meanMixDens <- meanMixDens + meanPostPiMix[j]*compDens                  # Mixture density
+}
+
+# Graphical comparison with data histogram 
+hist(x, breaks=20, freq=FALSE, xlim=xlim, main="Graphical comparison")
+lines(xGrid, dnorm(xGrid, mean=mean(meanPostMu), sd=sqrt(meanPostsig2)), type="l", lwd=2, col="blue")
+lines(xGrid, meanMixDens, type="l", lwd=2, lty=4, col="red") # (Same as mixDensMean)
+legend("topright", box.lty=1, legend=c("Data histogram","Mixture density","Normal density"), col=c("black","red","blue"), lwd=2)
+
+# Graphical comparison with data kernel 
+plot(kernelDensData$x, kernelDensData$y, type="l", lwd=2, lty=4, col="black",
+     main="Graphical comparison", xlab="Density", ylab="x")
+lines(xGrid, dnorm(xGrid, mean=meanPostMu, sd=sqrt(meanPostsig2)), type="l", lwd=2, col="blue")
+lines(xGrid, meanMixDens, type="l", lwd=2, col="red")
+legend("topright", box.lty=1, legend=c("Data Kernel Density","Normal density", "Mixture density"), col=c("black","blue","red"), lwd=2)
+
+```
+
+The mixture model does a much better job of capturing the data density than the joint normal posterior density evaluated using the gibbs sampler. 
+
+# 2. Metropolis Random Walk for Poisson regression
+
+## (a) MLE estimator of $\beta$ 
+
+```{r 2.1, fig.align='center', fig.height=4, fig.width=5}
+######################################################################
+# 2. Metropolis Random Walk for Poisson regression
+######################################################################
+# (a) MLE estimator of beta
+#library(glmnet)
+eBayData = read.delim("C:/Users/namit/Downloads/Bayesian Learning/R files/Lab3/eBayNumberOfBidderData.dat",
+                      header=TRUE, sep="")
+
+glmModel = glm(formula = nBids ~ . - Const , data = eBayData , family = "poisson")
+summary(glmModel)
+
+```
+
+Looking at pValue we can see that below covariates are most significant:  
+
+1. VerifyID
+2. Sealed
+3. LogBook
+4. MinBidShare
+5. MajBlem
+
+## (b) Bayesian analysis of the Poisson regression
+
+```{r 2.2, fig.align='center', fig.height=4, fig.width=5}
+#-------------------------------------------------------------------------
+# (b) Bayesian analysis of the Poisson regression
+
+# Log likelihood Estimation: 
+library(mvtnorm)
+
+# Function that returns log posterior of beta
+llk = function(beta, X , Y , mu, sigma){
+  ncovariates = length(beta)
+  x = X %*% beta
+  
+  logLikli = sum(Y * x - exp(x))
+  prior = dmvnorm(beta, mu, sigma, log=TRUE)
+  post = logLikli + prior
+  
+  return(post)
+}
+
+# Predictors and response variables
+Y = eBayData[,1]
+X = as.matrix(eBayData[,-1])
+
+# Covariates
+ncovariates = ncol(X)
+covNames = names(eBayData)[-1]
+
+# Set up prior parameters
+mu_0 =as.vector(rep(0, ncovariates))
+Sigma_0 = 100 * solve(t(X)%*% X)
+
+# Find the optimum beta that maximizes the log posterior of beta
+beta_init = as.vector(rep(0, ncovariates))
+
+optimBeta = optim(par = beta_init , fn = llk ,  
+                  X = X , Y = Y , mu = mu_0, sigma = Sigma_0 , 
+                  method=c("BFGS"), control=list(fnscale=-1), hessian=TRUE)
+
+postMode = optimBeta$par # Posterior mode=Optimum beta that maximizes the log posterior
+postCov = -solve(optimBeta$hessian) # Posterior covariance matrix is -inv(Hessian)
+PostStd = sqrt(diag(postCov)) # Computing approximate standard deviations.
+
+cat("The posterior mode is: " , "\n" , postMode , "\n")
+cat("\n")
+
+cat("The posterior variance-covariance matrix is: " , "\n")
+knitr::kable(postCov)
+cat("\n")
+
+#optimBeta
+cat("The approximate posterior standard deviation is: " , "\n" , PostStd , "\n")
+cat("\n")
+
+```
+
+## (c) Simulate from actual posterior of $\beta$ using Metropolis Algorithm
+
+```{r 2.3a, fig.align='center', fig.height=4, fig.width=5}
+#-------------------------------------------------------------------------
+# (c) Simulate from actual posterior of beta using Metropolis Algorithm
+fnMetropolish = function(nSample , theta , fnPoste , c , ...)
+  {
+    #Intialize 
+    theta_current = theta
+    Sigma_current = c * postCov
+    nAccepted = 0
+    ntheta = matrix(nrow=  nSample , ncol = length(theta))
+    ntheta[1,] = theta_current
+    
+    #j = 1
+    for(i in 2:nSample)
+    {
+      #proposal 
+      thetaProp = as.vector(rmvnorm(1 , mean = theta_current , sigma =Sigma_current))
+      
+      #Posterior in log order 
+      poste_current = fnPoste(theta_current , ...)
+      poste_propsal = fnPoste(thetaProp , ...)
+      
+      #acceptance propbability 
+      alpha = min(1 ,  exp(poste_propsal - poste_current))
+      
+      #check proposal acceptance 
+      u = runif(1 , 0 , 1)
+      if(u < alpha){
+        theta_current = thetaProp
+        nAccepted = nAccepted + 1
+      }
+      
+      #update theta matrix 
+      ntheta[i,] = theta_current
+      
+      #j = j + 1
+    }
+    
+    #Acceptance rate AR 
+    AR = 0
+    if(nAccepted > 0) AR =  nAccepted / (nSample)
+    
+    return(list("AcceptanceRate" = AR , "Theta" = ntheta))
+  }
+
+#intialize Simulation parameter 
+c = 0.65
+nSample = 10000
+#initBurn = 500
+theta_init = c(1.1, -0.4, 0.1, 0.3, -0.1, -0.4, 0.2, -0.1, -2)
+#Generate Sample from above function 
+metroSample_0.65 = fnMetropolish(nSample = nSample, 
+                            theta = theta_init , 
+                            fnPoste = llk, c = 0.65  , 
+                            X = X , 
+                            Y = Y , mu = mu_0, sigma = Sigma_0)
+acceptRate_0.65 = metroSample_0.65$AcceptanceRate
+cat("\n" , "Acceptance Rate at c = 0.65 is :" , acceptRate_0.65 , "\n" )
+
+
+```
+
+Since acceptance for c = 0.65 as tunning parameter is between 25% - 30% , taking it as tuning parameter.
+
+```{r 2.3b, fig.align='center', fig.height=4, fig.width=5}
+# MC beta 
+posteriorBeta = metroSample_0.65$Theta
+
+#For MCMC Convergence 
+beta1CumMean = cumsum(posteriorBeta[,1])/seq(1 , 10000 , 1)
+beta2CumMean = cumsum(posteriorBeta[,2])/seq(1 , 10000 , 1)
+beta3CumMean = cumsum(posteriorBeta[,3])/seq(1 , 10000 , 1)
+beta4CumMean = cumsum(posteriorBeta[,4])/seq(1 , 10000 , 1)
+beta5CumMean = cumsum(posteriorBeta[,5])/seq(1 , 10000 , 1)
+beta6CumMean = cumsum(posteriorBeta[,6])/seq(1 , 10000 , 1)
+beta7CumMean = cumsum(posteriorBeta[,7])/seq(1 , 10000 , 1)
+beta8CumMean = cumsum(posteriorBeta[,8])/seq(1 , 10000 , 1)
+beta9CumMean = cumsum(posteriorBeta[,9])/seq(1 , 10000 , 1)
+
+
+plot(posteriorBeta[,1] , xlab = "Beta 1" , main = "Constant" , type = "l")
+points(beta1CumMean , type = "l" , col = "blue")
+abline(h = postMode[1] , col = "red")
+
+
+plot(posteriorBeta[,2] , xlab = "Beta 2" , main = "PowerSeller" , type = "l")
+points(beta2CumMean , type = "l" , col = "blue")
+abline(h = postMode[2] , col = "red")
+
+
+plot(posteriorBeta[,3] , xlab = "Beta 3" , main = "VerifyID" , type = "l")
+points(beta3CumMean , type = "l" , col = "blue")
+abline(h = postMode[3] , col = "red")
+
+
+plot(posteriorBeta[,4] , xlab = "Beta 4" , main = "Sealed" , type = "l")
+points(beta4CumMean , type = "l" , col = "blue")
+abline(h = postMode[4] , col = "red")
+
+
+plot(posteriorBeta[,5] , xlab = "Beta 5" , main = "MinBlem" , type = "l")
+points(beta5CumMean , type = "l" , col = "blue")
+abline(h = postMode[5] , col = "red")
+
+
+plot(posteriorBeta[,6] , xlab = "Beta 6" , main = "MajBlem" , type = "l")
+points(beta6CumMean , type = "l" , col = "blue")
+abline(h = postMode[6] , col = "red")
+
+
+plot(posteriorBeta[,7] , xlab = "Beta 7" , main = "LargNeg" , type = "l")
+points(beta7CumMean , type = "l" , col = "blue")
+abline(h = postMode[7] , col = "red")
+
+plot(posteriorBeta[,8] , xlab = "Beta 8" , main = "LogBook" , type = "l")
+points(beta8CumMean , type = "l" , col = "blue")
+abline(h = postMode[8] , col = "red")
+
+plot(posteriorBeta[,9] , xlab = "Beta 9" , main = "MinBidShare" , type = "l")
+points(beta9CumMean , type = "l" , col = "blue")
+abline(h = postMode[9] , col = "red")
+
+```
+
+We can see that it is getting converged after 5000 Samples, so removing first 5000 samples as burn-in period.
+
+## (d)  Simulate predictive distribution
+
+```{r 2.4, fig.align='center', fig.height=4, fig.width=5}
+#-------------------------------------------------------------------------
+# (d)  Simulate predictive distribution 
+Xpred = c(1,1,1,1,0,0,0,1,0.5)
+posteriorBeta = posteriorBeta[5001:10000 , ]
+
+n = NROW(posteriorBeta)
+
+predDist = numeric(length = n)
+for(i in 1:n){
+  predDist[i] = rpois(1 , lambda = exp(Xpred %*% posteriorBeta[i,]))
+}
+
+library(lessR)
+hs(predDist , xlab = "Number of Bids" , main = "Bids Predictive Distribution")
+
+#probability of no bidders 
+probNoBids = length(which(predDist == 0)) / n
+cat("\n" , "Probability of no bids is: " , probNoBids)
+```
+
+
+```{r ref.label=c('1.1a', '1.1b', '1.2', '1.3', '2.1', '2.2', '2.3a', '2.3b', '2.4'), echo=TRUE, eval=FALSE}
+```
+
